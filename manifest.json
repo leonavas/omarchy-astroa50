@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "id": "leonavas.astroa50",
+  "name": "Astro A50",
+  "version": "1.0.0",
+  "author": "leonavas",
+  "license": "MIT",
+  "description": "The Astro A50 headset (Gen 4 and Gen 5) in the bar: battery with low-battery alerts, equalizer, mic level, sidetone, noise gate and game/voice mix, without Windows.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Astro.qml"
+  },
+  "barWidget": {
+    "displayName": "Astro A50",
+    "description": "Headset battery in the bar. Click opens EQ, microphone and mix settings; middle click toggles the percentage; the wheel cycles EQ presets.",
+    "category": "Status",
+    "aliases": [
+      "astro",
+      "a50",
+      "headset",
+      "headphones",
+      "eq",
+      "sidetone",
+      "battery"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "glyph": "󰋋",
+      "offGlyph": "󰟎",
+      "showPercentage": false,
+      "hideWhenAbsent": true,
+      "dimWhenOff": true,
+      "tintWhenLow": true,
+      "lowThreshold": 15,
+      "criticalThreshold": 5,
+      "notifyLow": true,
+      "pollSeconds": 60
+    },
+    "schema": [
+      {
+        "key": "glyph",
+        "type": "string",
+        "label": "Glyph",
+        "defaultValue": "󰋋",
+        "description": "Any Nerd Font character. Drawn while the headset is on or docked."
+      },
+      {
+        "key": "offGlyph",
+        "type": "string",
+        "label": "Glyph while the headset is off",
+        "defaultValue": "󰟎"
+      },
+      {
+        "key": "showPercentage",
+        "type": "boolean",
+        "label": "Show the percentage next to the glyph",
+        "defaultValue": false,
+        "description": "Middle click on the icon toggles this too."
+      },
+      {
+        "key": "hideWhenAbsent",
+        "type": "boolean",
+        "label": "Hide the icon while the base station is unplugged",
+        "defaultValue": true
+      },
+      {
+        "key": "dimWhenOff",
+        "type": "boolean",
+        "label": "Dim the icon while the headset is off",
+        "defaultValue": true
+      },
+      {
+        "key": "tintWhenLow",
+        "type": "boolean",
+        "label": "Colour the icon while the battery is low",
+        "defaultValue": true,
+        "description": "The theme's yellow from the low threshold down, its urgent colour from the critical threshold down."
+      },
+      {
+        "key": "lowThreshold",
+        "type": "integer",
+        "label": "Low battery below (%)",
+        "min": 0,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 15
+      },
+      {
+        "key": "criticalThreshold",
+        "type": "integer",
+        "label": "Critical battery below (%)",
+        "min": 0,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "notifyLow",
+        "type": "boolean",
+        "label": "Notify when the battery gets low and again when it gets critical",
+        "defaultValue": true
+      },
+      {
+        "key": "pollSeconds",
+        "type": "integer",
+        "label": "Battery check interval (seconds)",
+        "min": 10,
+        "max": 3600,
+        "step": 10,
+        "defaultValue": 60,
+        "description": "How often the bar asks the base station while the panel is closed. An open panel checks every 3 seconds."
+      }
+    ]
+  }
+}

@@ -1,0 +1,570 @@
+#!/usr/bin/env python3
+"""Talk to an Astro A50 base station (Gen 4 or Gen 5) over hidraw.
+
+Both generations expose a vendor HID collection (usage page 0xFF32, report
+ID 2, 64-byte reports) next to their USB audio interfaces, and both are driven
+by writing packets to it — but the two speak different protocols:
+
+  Gen 4  9886:002c  protocol reverse engineered by Tom Dryer for eh-fifty
+                    (https://github.com/tdryer/eh-fifty). Every setting reads
+                    back, and the station keeps active and saved values apart.
+  Gen 5  046d:0b1c  protocol reverse engineered for HeadsetControl
+                    (https://github.com/Sapd/HeadsetControl) and
+                    HeadsetControl-A50-GUI. Battery, volume and the chatmix
+                    dial read back; sidetone, EQ, noise gate and the dock LED
+                    are write-only, so the last values written are kept in
+                    ~/.local/state/astro-a50/gen5.json.
+
+This is an independent implementation of those protocols in Python's
+standard library. Nothing is detached from the kernel; the only setup is a udev
+rule that lets the logged-in user open the node.
+
+Every command prints one JSON object on stdout and exits 0, errors included.
+
+    astro-a50 status            everything the panel shows
+    astro-a50 battery           headset state and battery only
+    astro-a50 info              firmware versions (Gen 4)
+    astro-a50 set KEY VALUE     change one setting
+    astro-a50 save              write the active values to the station (Gen 4)
+    astro-a50 restore FILE      put back a `status` backup
+"""
+
+from __future__ import annotations
+
+import errno
+import fcntl
+import glob
+import json
+import os
+import select
+import sys
+import time
+
+REPORT_ID = 0x02
+REPORT_SIZE = 64
+# Gen 4's SAVE_VALUES can take over two seconds to answer.
+TIMEOUT_S = 3.0
+
+GEN4 = (0x9886, 0x002C)
+GEN5 = (0x046D, 0x0B1C)
+# The vendor collection both generations are driven through. Gen 5 also
+# exposes other HID interfaces; this is how the right node is told apart.
+VENDOR_DESCRIPTOR = bytes([0x06, 0x32, 0xFF])
+
+NOISE_GATES = ("streaming", "night", "home", "tournament")
+
+
+class Failure(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def bounded(text, low: int, high: int) -> int:
+    try:
+        number = int(round(float(text)))
+    except (TypeError, ValueError):
+        raise Failure("usage", "Not a number: " + str(text))
+    return max(low, min(high, number))
+
+
+def pick(text, allowed: tuple) -> int:
+    number = bounded(text, min(allowed), max(allowed))
+    if number not in allowed:
+        raise Failure("usage", "Expected one of " + ", ".join(map(str, allowed)))
+    return number
+
+
+def parse_gains(text: str, count: int, low: int, high: int) -> tuple[str, list[int]]:
+    """PRESET:G1,G2,... — the preset part is ignored where there are none."""
+    preset, _, gains_text = text.partition(":")
+    if not gains_text:
+        preset, gains_text = "", preset
+    gains = [bounded(g, low, high) for g in gains_text.split(",")]
+    if len(gains) != count:
+        raise Failure("usage", "eq-gain wants %d values" % count)
+    return preset, gains
+
+
+# ------------------------------------------------------------------ device
+
+
+def find_station() -> tuple[str, tuple[int, int]]:
+    """The hidraw node of the base station's vendor collection."""
+    wanted = {"HID_ID=0003:%08X:%08X" % ids: ids for ids in (GEN4, GEN5)}
+    for base in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            with open(base + "/device/uevent") as handle:
+                uevent = handle.read().upper()
+        except OSError:
+            continue
+        ids = next((v for k, v in wanted.items() if k in uevent), None)
+        if not ids:
+            continue
+        try:
+            with open(base + "/device/report_descriptor", "rb") as handle:
+                if not handle.read(3) == VENDOR_DESCRIPTOR:
+                    continue
+        except OSError:
+            continue
+        return "/dev/" + os.path.basename(base), ids
+    raise Failure("absent", "Base station not connected")
+
+
+class Link:
+    """One open hidraw node, serialised across processes."""
+
+    def __init__(self, node: str) -> None:
+        # One caller at a time: the bar poll and a panel write racing on the
+        # same node would each read the other's answer.
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        self._lock = open(os.path.join(runtime, "astro-a50.lock"), "w")
+        fcntl.flock(self._lock, fcntl.LOCK_EX)
+        try:
+            self._fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
+        except PermissionError:
+            self._lock.close()
+            raise Failure("permission", "No access to " + node + " (udev rule missing?)")
+
+    def close(self) -> None:
+        os.close(self._fd)
+        self._lock.close()
+
+    def drain(self) -> None:
+        while True:
+            try:
+                os.read(self._fd, REPORT_SIZE)
+            except BlockingIOError:
+                return
+
+    def write(self, packet: list[int]) -> None:
+        os.write(self._fd, bytes(packet + [0] * (REPORT_SIZE - len(packet))))
+
+    def read_until(self, accept, timeout: float = TIMEOUT_S) -> bytes:
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise Failure("timeout", "The base station did not answer")
+            ready, _, _ = select.select([self._fd], [], [], left)
+            if not ready:
+                continue
+            try:
+                frame = os.read(self._fd, REPORT_SIZE)
+            except BlockingIOError:
+                continue
+            if accept(frame):
+                return frame
+
+
+# ------------------------------------------------------------------- Gen 4
+
+
+class Gen4:
+    GENERATION = "Gen 4"
+    FEATURES = ["battery", "eq-presets", "eq", "mic-level", "sidetone", "noise-gate",
+                "mic-eq", "balance", "alert-volume", "save"]
+    EQ_PRESETS = (1, 2, 3)
+    DB_OFFSET = 12
+    EQ_RANGE = 7
+    NOISE_GATE_CODES = {"streaming": 0, "night": 1, "home": 2, "tournament": 3}
+
+    SLIDER_MIC = 0x04
+    SLIDER_SIDETONE = 0x05
+
+    GET_DEVICE_INFO = 0x03
+    GET_HEADSET_STATUS = 0x54
+    GET_BASE_FIRMWARE_MINOR = 0x55
+    SAVE_VALUES = 0x61
+    SET_SLIDER_VALUE = 0x62
+    SET_EQ_PRESET_GAIN = 0x63
+    SET_NOISE_GATE_MODE = 0x64
+    SET_ACTIVE_EQ_PRESET = 0x67
+    GET_SLIDER_VALUE = 0x68
+    GET_EQ_PRESET_GAIN = 0x69
+    GET_NOISE_GATE_MODE = 0x6A
+    GET_ACTIVE_EQ_PRESET = 0x6C
+    GET_EQ_PRESET_NAME = 0x6E
+    SET_MIC_EQ = 0x71
+    GET_BALANCE = 0x72
+    SET_DEFAULT_BALANCE = 0x73
+    SET_ALERT_VOLUME = 0x76
+    GET_DEFAULT_BALANCE = 0x77
+    GET_ALERT_VOLUME = 0x7A
+    GET_MIC_EQ = 0x7B
+    GET_BATTERY_STATUS = 0x7C
+    GET_HEADSET_FIRMWARE_MINOR = 0xD6
+    GET_HEADSET_FIRMWARE_MAJOR = 0xDA
+
+    def __init__(self, link: Link) -> None:
+        self.link = link
+
+    def request(self, command: int, payload: list[int] | None = None) -> bytes:
+        packet = [REPORT_ID, command]
+        if payload:
+            packet += [len(payload), *payload]
+        # A reply left over from an earlier, timed-out call would otherwise be
+        # taken as the answer to this one.
+        self.link.drain()
+        self.link.write(packet)
+        resp = self.link.read_until(lambda f: len(f) >= 3 and f[0] == REPORT_ID)
+        # 0x00 "no response" and 0x02 "ok" both carry data; 0x01 is an error.
+        if resp[1] not in (0x00, 0x02):
+            raise Failure("device", "Command 0x%02x refused" % command)
+        length = min(resp[2], len(resp) - 3)
+        return bytes(resp[3 : 3 + length])
+
+    def pair(self, command: int) -> dict:
+        return {"active": self.request(command, [0])[0], "saved": self.request(command, [1])[0]}
+
+    def slider(self, kind: int) -> dict:
+        resp = self.request(self.GET_SLIDER_VALUE, [kind])
+        return {"active": resp[2], "saved": resp[3]}
+
+    def headset(self) -> dict:
+        resp = self.request(self.GET_HEADSET_STATUS)
+        return {"docked": bool(resp[0] & 0x01), "on": bool(resp[0] & 0x02)}
+
+    def battery(self) -> dict:
+        resp = self.request(self.GET_BATTERY_STATUS)
+        return {"charging": bool(resp[0] & 0x80), "percent": resp[0] & 0x7F}
+
+    def eq_name(self, preset: int) -> str:
+        resp = self.request(self.GET_EQ_PRESET_NAME, [preset, 0])
+        return bytes(resp[2:]).split(b"\0", 1)[0].decode(errors="replace")
+
+    def eq_gain(self, preset: int) -> dict:
+        resp = self.request(self.GET_EQ_PRESET_GAIN, [preset])
+        return {"active": [b - self.DB_OFFSET for b in resp[2:7]],
+                "saved": [b - self.DB_OFFSET for b in resp[7:12]]}
+
+    def noise_gate(self) -> dict:
+        resp = self.request(self.GET_NOISE_GATE_MODE)
+        names = {v: k for k, v in self.NOISE_GATE_CODES.items()}
+        return {"active": names.get(resp[1], ""), "saved": names.get(resp[2], "")}
+
+    def firmware(self) -> dict:
+        info = self.request(self.GET_DEVICE_INFO)
+        minor = self.request(self.GET_BASE_FIRMWARE_MINOR)
+        out = {"base": "%d.%d" % (int.from_bytes(info[21:25], "little"), minor[0])}
+        try:
+            major = self.request(self.GET_HEADSET_FIRMWARE_MAJOR, [0x0A])
+            minor = self.request(self.GET_HEADSET_FIRMWARE_MINOR, [0x0A])
+            out["headset"] = "%d.%d" % (int.from_bytes(major[:4], "little"), minor[0])
+        except Failure:
+            out["headset"] = ""
+        return out
+
+    def battery_status(self) -> dict:
+        return {"headset": self.headset(), "battery": self.battery()}
+
+    def status(self) -> dict:
+        gains = {str(p): self.eq_gain(p) for p in self.EQ_PRESETS}
+        state = {
+            "features": self.FEATURES,
+            "headset": self.headset(),
+            "battery": self.battery(),
+            "eqPreset": self.request(self.GET_ACTIVE_EQ_PRESET)[0],
+            "eqNames": [self.eq_name(p) for p in self.EQ_PRESETS],
+            "eqGain": gains,
+            "eqRange": self.EQ_RANGE,
+            "eqFreqs": [],
+            "noiseGates": list(NOISE_GATES),
+            "noiseGate": self.noise_gate(),
+            "mic": self.slider(self.SLIDER_MIC),
+            "sidetone": self.slider(self.SLIDER_SIDETONE),
+            "sidetoneStep": 1,
+            "balance": self.request(self.GET_BALANCE)[0],
+            "defaultBalance": self.pair(self.GET_DEFAULT_BALANCE),
+            "alertVolume": self.pair(self.GET_ALERT_VOLUME),
+            "micEq": self.pair(self.GET_MIC_EQ),
+        }
+        pairs = [state[k] for k in ("noiseGate", "mic", "sidetone", "defaultBalance",
+                                    "alertVolume", "micEq")] + list(gains.values())
+        state["unsaved"] = any(p["active"] != p["saved"] for p in pairs)
+        return state
+
+    def set(self, key: str, value: str) -> None:
+        if key == "eq-preset":
+            self.request(self.SET_ACTIVE_EQ_PRESET, [pick(value, self.EQ_PRESETS)])
+        elif key == "noise-gate":
+            if value not in self.NOISE_GATE_CODES:
+                raise Failure("usage", "noise-gate is one of " + ", ".join(NOISE_GATES))
+            self.request(self.SET_NOISE_GATE_MODE, [self.NOISE_GATE_CODES[value]])
+        elif key == "mic":
+            self.request(self.SET_SLIDER_VALUE, [self.SLIDER_MIC, bounded(value, 0, 100)])
+        elif key == "sidetone":
+            self.request(self.SET_SLIDER_VALUE, [self.SLIDER_SIDETONE, bounded(value, 0, 100)])
+        elif key == "balance":
+            self.request(self.SET_DEFAULT_BALANCE, [bounded(value, 0, 255)])
+        elif key == "alert-volume":
+            self.request(self.SET_ALERT_VOLUME, [bounded(value, 0, 100)])
+        elif key == "mic-eq":
+            self.request(self.SET_MIC_EQ, [pick(value, (0, 1, 2))])
+        elif key == "eq-gain":
+            preset, gains = parse_gains(value, 5, -self.EQ_RANGE, self.EQ_RANGE)
+            self.request(self.SET_EQ_PRESET_GAIN,
+                         [pick(preset, self.EQ_PRESETS), *[g + self.DB_OFFSET for g in gains]])
+        else:
+            raise Failure("usage", "Unknown setting for Gen 4: " + key)
+
+    def save(self) -> None:
+        resp = self.request(self.SAVE_VALUES)
+        if len(resp) < 2 or resp[1] != 0:
+            raise Failure("device", "Base station did not confirm the save")
+
+    def restore(self, backup: dict) -> None:
+        # The *saved* half of every pair: that is what the station powers up
+        # with, so it is what a backup taken with `status` brings back.
+        def saved(key):
+            return str(backup[key]["saved"])
+
+        for preset, gains in backup["eqGain"].items():
+            self.set("eq-gain", preset + ":" + ",".join(str(g) for g in gains["saved"]))
+        self.set("noise-gate", backup["noiseGate"]["saved"])
+        self.set("mic", saved("mic"))
+        self.set("sidetone", saved("sidetone"))
+        self.set("balance", saved("defaultBalance"))
+        self.set("alert-volume", saved("alertVolume"))
+        self.set("mic-eq", saved("micEq"))
+        self.set("eq-preset", str(backup["eqPreset"]))
+        self.save()
+
+
+# ------------------------------------------------------------------- Gen 5
+
+
+class Gen5:
+    GENERATION = "Gen 5"
+    FEATURES = ["battery", "eq-templates", "eq", "sidetone", "noise-gate",
+                "headset-volume", "chatmix", "dock-light"]
+
+    MARKER = 0x0C
+    CMD_BATTERY = 0x06
+    CMD_VOLUME = 0x08
+    CMD_SIDETONE = 0x09
+    CMD_CHATMIX = 0x0A
+    CMD_EQ = 0x0D
+    CMD_LIGHT = 0x0F
+    CMD_NOISE_GATE = 0x14
+    # The handle is an echo token; these are the values G HUB was seen using.
+    HANDLE_GET = 0x0C
+    HANDLE_VOLUME = 0x1B
+    HANDLE_SIDETONE = 0x1C
+    HANDLE_LIGHT = 0x1C
+    HANDLE_EQ = 0x2C
+    HANDLE_NOISE_GATE = 0x2D
+
+    VOLUME_MAX = 21
+    SIDETONE_MAX = 6
+    CHATMIX_MAX = 12
+    EQ_RANGE = 6
+    EQ_FREQS = [20, 50, 125, 250, 500, 1000, 2500, 5000, 10000, 20000]
+    EQ_Q = 0.6875
+    NOISE_GATE_CODES = {"streaming": 0x00, "night": 0x01, "home": 0x02, "tournament": 0x04}
+    # Starting points only: the station keeps no named presets of its own.
+    EQ_TEMPLATES = {
+        "Flat": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "Gaming": [3, 2, 0, -1, 0, 1, 3, 4, 2, 1],
+        "Media": [4, 3, 1, 0, -1, -1, 0, 2, 3, 4],
+    }
+
+    def __init__(self, link: Link) -> None:
+        self.link = link
+        state_home = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+        self.memory_path = os.path.join(state_home, "astro-a50", "gen5.json")
+
+    def frame(self, command: int, handle: int, payload: list[int]) -> list[int]:
+        return [REPORT_ID, self.MARKER, 3 + len(payload), 0x00, command, handle, *payload]
+
+    def get(self, command: int) -> bytes:
+        self.link.drain()
+        self.link.write(self.frame(command, self.HANDLE_GET, []))
+        # The station also pushes frames on its own when something changes;
+        # only the one answering this command counts.
+        return self.link.read_until(
+            lambda f: len(f) >= 7 and f[0] == REPORT_ID and f[1] == self.MARKER and f[4] == command,
+            timeout=1.0)
+
+    def send(self, command: int, handle: int, payload: list[int]) -> None:
+        self.link.write(self.frame(command, handle, payload))
+
+    # The write-only settings, as last written from here.
+    def memory(self) -> dict:
+        try:
+            with open(self.memory_path) as handle:
+                data = json.load(handle)
+                return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def remember(self, **values) -> None:
+        data = self.memory()
+        data.update(values)
+        os.makedirs(os.path.dirname(self.memory_path), exist_ok=True)
+        with open(self.memory_path, "w") as handle:
+            json.dump(data, handle)
+
+    def battery(self) -> dict:
+        resp = self.get(self.CMD_BATTERY)
+        return {"percent": min(100, resp[6]), "charging": bool(resp[8])}
+
+    def battery_status(self) -> dict:
+        battery = self.battery()
+        # There is no documented power query; a headset that reports a level
+        # is one the station can hear.
+        return {"headset": {"on": battery["percent"] > 0, "docked": battery["charging"]},
+                "battery": battery}
+
+    def status(self) -> dict:
+        memory = self.memory()
+        gains = memory.get("eq") or self.EQ_TEMPLATES["Flat"]
+        state = self.battery_status()
+        volume = self.get(self.CMD_VOLUME)[8]
+        chatmix = self.get(self.CMD_CHATMIX)[6]
+        sidetone = memory.get("sidetone")
+        state.update({
+            "features": self.FEATURES,
+            "eqPreset": 0,
+            "eqNames": list(self.EQ_TEMPLATES),
+            "eqTemplates": self.EQ_TEMPLATES,
+            "eqGain": {"0": {"active": gains, "saved": gains}},
+            "eqRange": self.EQ_RANGE,
+            "eqFreqs": self.EQ_FREQS,
+            "noiseGates": list(NOISE_GATES),
+            "noiseGate": {"active": memory.get("noiseGate", ""), "saved": memory.get("noiseGate", "")},
+            "sidetone": {"active": sidetone, "saved": sidetone} if sidetone is not None else None,
+            "sidetoneStep": round(100 / self.SIDETONE_MAX, 4),
+            "headsetVolume": {"active": round(min(volume, self.VOLUME_MAX) * 100 / self.VOLUME_MAX)},
+            # The dial on the headset: 0 all voice, 12 all game.
+            "chatmix": {"game": round(min(chatmix, self.CHATMIX_MAX) * 100 / self.CHATMIX_MAX)},
+            "dockLight": {"active": memory.get("dockLight")},
+            "unsaved": False,
+        })
+        return state
+
+    def set(self, key: str, value: str) -> None:
+        if key == "noise-gate":
+            if value not in self.NOISE_GATE_CODES:
+                raise Failure("usage", "noise-gate is one of " + ", ".join(NOISE_GATES))
+            self.send(self.CMD_NOISE_GATE, self.HANDLE_NOISE_GATE, [self.NOISE_GATE_CODES[value]])
+            self.remember(noiseGate=value)
+        elif key == "sidetone":
+            percent = bounded(value, 0, 100)
+            level = round(percent * self.SIDETONE_MAX / 100)
+            self.send(self.CMD_SIDETONE, self.HANDLE_SIDETONE, [0x01, 0xFF, level])
+            self.remember(sidetone=round(level * 100 / self.SIDETONE_MAX))
+        elif key == "headset-volume":
+            level = round(bounded(value, 0, 100) * self.VOLUME_MAX / 100)
+            self.send(self.CMD_VOLUME, self.HANDLE_VOLUME, [0xFF, level])
+        elif key == "dock-light":
+            percent = bounded(value, 0, 100)
+            self.send(self.CMD_LIGHT, self.HANDLE_LIGHT, [percent])
+            self.remember(dockLight=percent)
+        elif key in ("eq-gain", "eq-template"):
+            if key == "eq-template":
+                if value not in self.EQ_TEMPLATES:
+                    raise Failure("usage", "eq-template is one of " + ", ".join(self.EQ_TEMPLATES))
+                gains = self.EQ_TEMPLATES[value]
+            else:
+                _, gains = parse_gains(value, 10, -self.EQ_RANGE, self.EQ_RANGE)
+            self.write_eq(gains)
+            self.remember(eq=gains)
+        else:
+            raise Failure("usage", "Unknown setting for Gen 5: " + key)
+
+    def write_eq(self, gains: list[int]) -> None:
+        # 01 = headphone output (00 would be the mic), then 10 bands of
+        # [freq BE16][Q LE16][gain], gain byte = 120 + dB * 20.
+        payload = [0x01, 0x03, 0x00]
+        q = round(self.EQ_Q * 32)
+        for freq, gain in zip(self.EQ_FREQS, gains):
+            payload += [freq >> 8, freq & 0xFF, q & 0xFF, q >> 8,
+                        max(0, min(240, 120 + gain * 20))]
+        self.send(self.CMD_EQ, self.HANDLE_EQ, payload)
+
+    def save(self) -> None:
+        raise Failure("usage", "Gen 5 applies settings immediately; there is nothing to save")
+
+    def restore(self, backup: dict) -> None:
+        gains = (backup.get("eqGain") or {}).get("0", {}).get("active")
+        if gains:
+            self.set("eq-gain", ",".join(str(g) for g in gains))
+        gate = (backup.get("noiseGate") or {}).get("active")
+        if gate:
+            self.set("noise-gate", gate)
+        sidetone = (backup.get("sidetone") or {}).get("active")
+        if sidetone is not None:
+            self.set("sidetone", str(sidetone))
+        volume = (backup.get("headsetVolume") or {}).get("active")
+        if volume is not None:
+            self.set("headset-volume", str(volume))
+        light = (backup.get("dockLight") or {}).get("active")
+        if light is not None:
+            self.set("dock-light", str(light))
+
+
+# -------------------------------------------------------------------- main
+
+
+def run(args: list[str]) -> dict:
+    command = args[0] if args else "status"
+    if command not in {"status", "battery", "info", "set", "save", "restore"}:
+        raise Failure("usage", __doc__.strip().split("\n\n")[-1])
+    if command == "set" and len(args) != 3:
+        raise Failure("usage", "set KEY VALUE")
+    backup = None
+    if command == "restore":
+        if len(args) != 2:
+            raise Failure("usage", "restore FILE")
+        try:
+            with open(args[1]) as handle:
+                backup = json.load(handle)
+        except (OSError, ValueError) as error:
+            raise Failure("usage", "Unreadable backup: " + str(error))
+        if not backup.get("connected") or backup.get("error"):
+            raise Failure("usage", "Not a status backup: " + args[1])
+
+    node, ids = find_station()
+    link = Link(node)
+    try:
+        station = Gen4(link) if ids == GEN4 else Gen5(link)
+        head = {"connected": True, "name": "Astro A50", "generation": station.GENERATION}
+        if command == "restore" and backup.get("generation", Gen4.GENERATION) != station.GENERATION:
+            raise Failure("usage", "Backup is from a %s station" % backup.get("generation", "Gen 4"))
+        if command == "status":
+            return {**head, **station.status()}
+        if command == "battery":
+            return {**head, **station.battery_status()}
+        if command == "info":
+            firmware = station.firmware() if isinstance(station, Gen4) else {}
+            return {**head, "node": node, "firmware": firmware}
+        if command == "set":
+            station.set(args[1], args[2])
+        elif command == "restore":
+            station.restore(backup)
+        else:
+            station.save()
+        return {**head, "ok": True}
+    finally:
+        link.close()
+
+
+def main() -> int:
+    try:
+        result = run(sys.argv[1:])
+    except Failure as failure:
+        result = {"connected": failure.code not in {"absent", "permission"},
+                  "error": failure.code, "message": failure.message}
+    except OSError as error:
+        # The base station unplugged mid-call surfaces as ENODEV/EIO.
+        gone = error.errno in {errno.ENODEV, errno.EIO, errno.ENOENT}
+        result = {"connected": not gone, "error": "absent" if gone else "io",
+                  "message": str(error)}
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

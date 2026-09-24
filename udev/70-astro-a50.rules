@@ -1,0 +1,6 @@
+# Astro A50 base stations: let the logged-in user open the vendor HID
+# interface the leonavas.astroa50 widget talks to.
+# Gen 4
+KERNEL=="hidraw*", ATTRS{idVendor}=="9886", ATTRS{idProduct}=="002c", MODE="0660", TAG+="uaccess"
+# Gen 5
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0b1c", MODE="0660", TAG+="uaccess"
