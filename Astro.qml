@@ -490,6 +490,7 @@ Panel {
           implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroPercent.implicitHeight)
 
           Text {
+            textFormat: Text.PlainText
             id: heroIcon
             text: root.hasReading ? Model.batteryIcon(root.percent, root.charging)
                                   : (root.headsetOn ? root.glyph : root.offGlyph)
@@ -510,6 +511,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: [root.station.name || "Astro A50", root.station.generation || ""]
                 .filter(function(t) { return t.length > 0 }).join(" · ")
               color: root.bar.foreground
@@ -521,6 +523,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: Model.stateLabel(root.station).toUpperCase()
               color: Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
@@ -533,6 +536,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             id: heroPercent
             text: root.hasReading ? root.percent + "%" : "—"
             color: root.alertColor
@@ -569,6 +573,7 @@ Panel {
 
         // ---------- Not reachable ----------
         Text {
+          textFormat: Text.PlainText
           visible: !root.connected
           width: parent.width
           wrapMode: Text.WordWrap
@@ -684,6 +689,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: "Click above or below the line, or scroll, to move a band by 1 dB." +
                     (root.has("eq-templates") ? " Presets are starting points; the base station keeps one curve." : "")
               color: root.bar.foreground
@@ -726,6 +732,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: "Noise gate"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -744,6 +751,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: root.has("mic-eq")
               text: "Mic EQ"
               color: root.bar.foreground
@@ -781,6 +789,7 @@ Panel {
               implicitHeight: visible ? Math.max(outputLabel.implicitHeight, outputGroup.implicitHeight) : 0
 
               Text {
+                textFormat: Text.PlainText
                 id: outputLabel
                 text: "PC output"
                 color: root.bar.foreground
@@ -813,6 +822,7 @@ Panel {
             // default on chat everything shares one channel and the slider is
             // just a volume knob, so it steps aside.
             Text {
+              textFormat: Text.PlainText
               visible: root.has("balance") && root.defaultOutput === "chat"
               width: parent.width
               wrapMode: Text.WordWrap
@@ -850,6 +860,7 @@ Panel {
               implicitHeight: visible ? dialLabel.implicitHeight : 0
 
               Text {
+                textFormat: Text.PlainText
                 id: dialLabel
                 text: "Game / voice dial"
                 color: root.bar.foreground
@@ -859,6 +870,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 text: Model.dialLabel(root.station.chatmix)
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
@@ -899,6 +911,7 @@ Panel {
             implicitHeight: Math.max(saveCaption.implicitHeight, saveButton.implicitHeight)
 
             Text {
+              textFormat: Text.PlainText
               id: saveCaption
               anchors.left: parent.left
               anchors.right: saveButton.left
@@ -959,6 +972,7 @@ Panel {
       implicitHeight: rowLabel.implicitHeight
 
       Text {
+        textFormat: Text.PlainText
         id: rowLabel
         text: sliderRow.label
         color: root.bar.foreground
@@ -968,6 +982,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         text: sliderRow.valueText
         color: root.bar.foreground
         font.family: root.bar.fontFamily
@@ -1032,6 +1047,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: bandLabel
       anchors.top: bandTrack.bottom
       anchors.topMargin: Style.space(4)
@@ -1044,6 +1060,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: freqText
       visible: eqBand.freq.length > 0
       anchors.top: bandLabel.bottom
