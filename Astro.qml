@@ -51,8 +51,9 @@ Panel {
   readonly property bool hasReading: Model.hasReading(root.station)
   readonly property int percent: root.hasReading ? Number(root.station.battery.percent) : 0
   readonly property bool charging: root.hasReading && !!root.station.battery.charging
-  readonly property bool discharging: root.headsetOn && !root.docked
+  readonly property bool discharging: root.headsetOn && !root.docked && !root.charging
   readonly property string timeLeft: root.hasReading ? Model.timeLeft(root.station.battery.minutesLeft) : ""
+  readonly property string timeToFull: root.hasReading ? Model.timeLeft(root.station.battery.minutesToFull) : ""
   readonly property string alertLevel: root.hasReading
     ? Model.alertLevel(root.percent, root.charging, root.lowThreshold, root.criticalThreshold)
     : ""
@@ -101,6 +102,8 @@ Panel {
   }
 
   property string themeYellow: ""
+  property string themeGreen: ""
+  readonly property color chargeColor: root.themeGreen.length > 0 ? root.themeGreen : "#9ece6a"
   readonly property color warning: root.themeYellow.length > 0 ? root.themeYellow : "#e0af68"
   readonly property color alertColor: root.critical
     ? root.bar.urgent
@@ -118,8 +121,11 @@ Panel {
     path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
     watchChanges: false
     printErrors: false
-    onLoaded: root.themeYellow = Model.themeColor(text(), ["yellow", "bright_yellow"], "")
-    onLoadFailed: root.themeYellow = ""
+    onLoaded: {
+      root.themeYellow = Model.themeColor(text(), ["yellow", "bright_yellow"], "")
+      root.themeGreen = Model.themeColor(text(), ["green", "bright_green"], "")
+    }
+    onLoadFailed: { root.themeYellow = ""; root.themeGreen = "" }
   }
   Connections {
     target: Color
@@ -451,7 +457,8 @@ Panel {
       if (!root.connected) return "Astro A50 — " + Model.stateLabel(root.station).toLowerCase()
       if (!root.hasReading) return "Astro A50 — " + Model.stateLabel(root.station).toLowerCase()
       return "Astro A50 — " + root.percent + "%, " + Model.stateLabel(root.station).toLowerCase() +
-        (root.timeLeft.length > 0 ? ", " + root.timeLeft + " left" : "")
+        (root.timeLeft.length > 0 ? ", " + root.timeLeft + " left" : "") +
+        (root.timeToFull.length > 0 ? ", full in " + root.timeToFull : "")
     }
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.togglePercentage()
@@ -459,6 +466,27 @@ Panel {
     }
     onWheelMoved: function(delta) {
       if (root.connected) root.cycleEqPreset(delta > 0 ? 1 : -1)
+    }
+  }
+
+  // A small bolt on the corner of the icon while charging, breathing slowly.
+  Text {
+    visible: root.shown && root.charging
+    textFormat: Text.PlainText
+    text: "󱐋"
+    color: root.chargeColor
+    font.family: root.bar.fontFamily
+    font.pixelSize: Math.round(Style.font.caption * 0.95)
+    anchors.horizontalCenter: button.horizontalCenter
+    anchors.horizontalCenterOffset: Math.round(button.width / 2 - width / 2 - Style.space(1))
+    anchors.verticalCenter: button.verticalCenter
+    anchors.verticalCenterOffset: -Math.round(button.height * 0.2)
+
+    SequentialAnimation on opacity {
+      running: root.charging
+      loops: Animation.Infinite
+      NumberAnimation { to: 0.35; duration: 1200; easing.type: Easing.InOutSine }
+      NumberAnimation { to: 1; duration: 1200; easing.type: Easing.InOutSine }
     }
   }
 
@@ -559,9 +587,11 @@ Panel {
             // How long the current discharge has left at the rate it has
             // been dropping, from the backend's battery log.
             Text {
-              visible: root.hasReading && !root.charging && root.discharging
+              visible: root.hasReading && (root.charging || root.discharging)
               textFormat: Text.PlainText
-              text: root.timeLeft.length > 0 ? root.timeLeft + " left" : "estimating…"
+              text: root.charging
+                ? (root.timeToFull.length > 0 ? "full in " + root.timeToFull : "estimating…")
+                : (root.timeLeft.length > 0 ? root.timeLeft + " left" : "estimating…")
               color: root.bar.foreground
               opacity: 0.6
               font.family: root.bar.fontFamily

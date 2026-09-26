@@ -191,7 +191,9 @@ function themeColor(raw, keys, fallback) {
 // estimate yet.
 function timeLeft(minutes) {
   if (minutes === undefined || minutes === null || !isFinite(Number(minutes))) return ""
-  var m = Math.max(0, Math.round(Number(minutes)))
+  // A negative figure is a floor from one percent step: at least this long.
+  var floor = Number(minutes) < 0
+  var m = Math.abs(Math.round(Number(minutes)))
   var h = Math.floor(m / 60)
-  return h > 0 ? h + "h " + (m % 60) + "m" : m + "m"
+  return (floor ? "≥ " : "") + (h > 0 ? h + "h " + (m % 60) + "m" : m + "m")
 }

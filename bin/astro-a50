@@ -508,21 +508,24 @@ class Gen5:
 # ----------------------------------------------------------- battery life
 
 # A reading more than this long after the previous one means the device was
-# off or asleep in between; that stretch drained (next to) nothing, so it is
-# left out of the discharge clock instead of making the estimate optimistic.
+# off or asleep in between; that stretch is left out of the clock instead of
+# skewing the rate.
 GAP_S = 15 * 60
-# Enough of a discharge to trust a slope: this long on battery, and at least
-# two percent steps crossed after the first reading.
+# Enough of a run to trust a slope: this long, and at least two percent steps
+# crossed after the first reading.
 MIN_SPAN_S = 20 * 60
 RECENT_POINTS = 60
 
 
-def track_battery(path: str, percent: int, discharging: bool) -> int | None:
+def track_battery(path: str, percent: int, mode: str | None) -> int | None:
     """Log one battery reading and return the minutes left, or None.
 
-    The discharge is kept as (seconds on battery, percent) points, one per
-    percent step, in a small state file so it survives the widget and the
-    shell restarting. Charging, docking or a jump back up starts a new one.
+    `mode` is "discharging" (minutes until empty), "charging" (minutes until
+    full) or None (docked full, off: nothing to time). The run is kept as
+    (seconds of clock, percent) points, one per percent step, in a small state
+    file so it survives the widget and the shell restarting; switching mode or
+    a step the wrong way starts a new run. A negative number is a floor from a
+    single step (see early_minutes).
     """
     now = time.time()
     try:
@@ -533,14 +536,19 @@ def track_battery(path: str, percent: int, discharging: bool) -> int | None:
     points = state.get("points") or []
     clock = float(state.get("clock") or 0)
     seen = state.get("seen")
+    if state.get("mode", "discharging") != mode:
+        points, clock = [], 0.0
 
-    if not discharging or percent <= 0:
+    if mode is None or percent <= 0:
         points, clock = [], 0.0
     else:
         if seen is not None and 0 < now - seen <= GAP_S:
             clock += now - seen
-        if points and percent > points[-1][1] + 1:
-            points, clock = [], 0.0
+        if points:
+            last = points[-1][1]
+            backwards = percent > last + 1 if mode == "discharging" else percent < last - 1
+            if backwards:
+                points, clock = [], 0.0
         if not points or percent != points[-1][1]:
             points.append([round(clock), percent])
         points = points[-RECENT_POINTS:]
@@ -548,50 +556,69 @@ def track_battery(path: str, percent: int, discharging: bool) -> int | None:
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path + ".tmp", "w") as handle:
-            json.dump({"points": points, "clock": round(clock), "seen": now}, handle)
+            json.dump({"mode": mode, "points": points, "clock": round(clock), "seen": now}, handle)
         os.replace(path + ".tmp", path)
     except OSError:
         pass
-    return estimate_minutes(points, clock, percent) if discharging else None
+    if mode is None:
+        return None
+    # Percent still to go: down to 0, or up to 100.
+    remaining = percent if mode == "discharging" else 100 - percent
+    return estimate_minutes(points, clock, remaining)
 
 
-def estimate_minutes(points: list, clock: float, percent: int) -> int | None:
+def estimate_minutes(points: list, clock: float, remaining: int) -> int | None:
     # The first reading lands somewhere inside its percent step; only the
     # later points sit on step boundaries, so the fit starts at the second.
     points = points[1:]
+    if len(points) == 1 and clock - points[0][0] >= MIN_SPAN_S:
+        return early_minutes(points[0][0], clock, remaining)
     if len(points) < 2 or points[-1][0] - points[0][0] < MIN_SPAN_S:
         return None
-    # Least-squares slope of percent over time on battery.
+    # Least-squares slope of percent over time, in steps per second.
     n = len(points)
     mean_t = sum(p[0] for p in points) / n
     mean_p = sum(p[1] for p in points) / n
     spread = sum((p[0] - mean_t) ** 2 for p in points)
     if spread <= 0:
         return None
-    slope = sum((p[0] - mean_t) * (p[1] - mean_p) for p in points) / spread
-    if slope >= 0:
+    slope = abs(sum((p[0] - mean_t) * (p[1] - mean_p) for p in points) / spread)
+    if slope <= 0:
         return None
     # The current step began at the last point and part of it is spent; the
     # device may floor or round, so count the step from its middle.
-    left = (percent + 0.5) / -slope - (clock - points[-1][0])
+    left = (remaining + 0.5) / slope - (clock - points[-1][0])
     return max(0, round(left / 60))
 
 
-# -------------------------------------------------------------------- main
-
+def early_minutes(boundary: float, clock: float, remaining: int) -> int:
+    """One step boundary seen so far: a percent takes at least as long as the
+    current one has, which gives a floor on the time left. Negative, so the
+    panel can tell it from a fitted estimate."""
+    step = clock - boundary
+    left = (remaining + 0.5) * step - step
+    return -max(1, round(left / 60))
 
 BATTERY_LOG = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
                            "astro-a50", "battery.json")
 
 
 def with_estimate(state: dict) -> dict:
-    """Only a headset on and off the dock is discharging; docked or charging
-    starts the next discharge from scratch."""
+    """A headset on and off the dock is discharging; one charging is timed to
+    full; anything else (docked and full, switched off) is not timed."""
     headset = state.get("headset") or {}
     battery = state.get("battery") or {}
-    discharging = bool(headset.get("on")) and not headset.get("docked") and not battery.get("charging")
-    if battery:
-        battery["minutesLeft"] = track_battery(BATTERY_LOG, int(battery.get("percent") or 0), discharging)
+    if not battery:
+        return state
+    if battery.get("charging"):
+        mode = "charging"
+    elif headset.get("on") and not headset.get("docked"):
+        mode = "discharging"
+    else:
+        mode = None
+    minutes = track_battery(BATTERY_LOG, int(battery.get("percent") or 0), mode)
+    battery["minutesLeft"] = minutes if mode == "discharging" else None
+    battery["minutesToFull"] = minutes if mode == "charging" else None
     return state
 
 
