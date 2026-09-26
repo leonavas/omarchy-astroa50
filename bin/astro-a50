@@ -511,9 +511,11 @@ class Gen5:
 # off or asleep in between; that stretch is left out of the clock instead of
 # skewing the rate.
 GAP_S = 15 * 60
-# Enough of a run to trust a slope: this long, and at least two percent steps
-# crossed after the first reading.
+# Enough of a run to trust a slope: three percent steps crossed after the
+# first reading, or two over at least this long.
 MIN_SPAN_S = 20 * 60
+# After a single step, how long it has to have lasted before its floor shows.
+EARLY_S = 5 * 60
 RECENT_POINTS = 60
 
 
@@ -571,9 +573,11 @@ def estimate_minutes(points: list, clock: float, remaining: int) -> int | None:
     # The first reading lands somewhere inside its percent step; only the
     # later points sit on step boundaries, so the fit starts at the second.
     points = points[1:]
-    if len(points) == 1 and clock - points[0][0] >= MIN_SPAN_S:
-        return early_minutes(points[0][0], clock, remaining)
-    if len(points) < 2 or points[-1][0] - points[0][0] < MIN_SPAN_S:
+    if len(points) == 1:
+        return early_minutes(points[0][0], clock, remaining) if clock - points[0][0] >= EARLY_S else None
+    # Three step boundaries are enough on their own (a fast charge crosses
+    # them in minutes); with only two, wait for a longer stretch.
+    if len(points) < 2 or (len(points) < 3 and points[-1][0] - points[0][0] < MIN_SPAN_S):
         return None
     # Least-squares slope of percent over time, in steps per second.
     n = len(points)

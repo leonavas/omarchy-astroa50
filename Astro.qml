@@ -105,15 +105,18 @@ Panel {
   property string themeGreen: ""
   readonly property color chargeColor: root.themeGreen.length > 0 ? root.themeGreen : "#9ece6a"
   readonly property color warning: root.themeYellow.length > 0 ? root.themeYellow : "#e0af68"
+  // Topped up: painted in the charge colour until it drops below 100 again.
+  readonly property bool fullyCharged: root.hasReading && root.percent >= 100
   readonly property color alertColor: root.critical
     ? root.bar.urgent
-    : (root.low ? root.warning : root.bar.foreground)
+    : (root.low ? root.warning : (root.fullyCharged ? root.chargeColor : root.bar.foreground))
 
   PersistentProperties {
     id: persisted
     reloadableId: "leonavas-astroa50"
     property bool notifiedLow: false
     property bool notifiedCritical: false
+    property bool notifiedFull: false
   }
 
   FileView {
@@ -292,9 +295,21 @@ Panel {
     notifyProc.running = true
   }
 
+  // Once per charge, when it reaches 100%; re-arms once it is down to 95%.
+  function checkFull() {
+    if (!root.hasReading) return
+    if (root.percent <= 95) persisted.notifiedFull = false
+    if (!root.fullyCharged || persisted.notifiedFull || !root.notifyLow) return
+    persisted.notifiedFull = true
+    fullProc.command = ["notify-send", "--app-name=Astro A50", "--urgency=normal",
+      "--icon=battery-full-charged", "Headset fully charged", "100% — ready to go off the dock."]
+    fullProc.running = true
+  }
+
+  onFullyChargedChanged: root.checkFull()
   onLowChanged: root.checkLow()
   onCriticalChanged: root.checkLow()
-  onPercentChanged: root.checkLow()
+  onPercentChanged: { root.checkLow(); root.checkFull() }
   onOpenedChanged: if (root.opened) root.refresh()
 
   function togglePercentage() {
@@ -384,6 +399,7 @@ Panel {
   }
 
   Process { id: notifyProc }
+  Process { id: fullProc }
 
   // ------------------------------------------------------------- output
   // PipeWire sees the station as two sinks, stereo-game and stereo-chat, and
@@ -450,7 +466,7 @@ Panel {
       return labelled ? root.percent + "% " + icon : icon
     }
     slotSize: Style.bar.iconSlot * (labelled ? 2 : 1)
-    active: root.tintWhenLow && root.low
+    active: (root.tintWhenLow && root.low) || root.fullyCharged
     activeColor: root.alertColor
     dimmed: root.dimWhenOff && !root.headsetOn
     tooltipText: {

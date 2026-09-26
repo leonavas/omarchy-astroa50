@@ -12,10 +12,12 @@ on Windows.
 - **5%**: the icon turns red and you get a critical notification that stays on screen.
 - **Time left**: while the headset is on and off the dock, the panel shows how long
   the battery has left (`3h 25m`, or `45m` under an hour), fitted to how fast it
-  has been dropping. It says "estimating…" until it has seen two percent steps
-  over 20 minutes (after one step it shows a floor, `≥ 9h 10m`); time with the
+  has been dropping. It says "estimating…" until it has seen three percent steps,
+  or two over 20 minutes (after one step it shows a floor, `≥ 9h 10m`); time with the
   headset off doesn't count. On the dock it times the charge instead: `full in 45m`.
 - **Charging**: a small bolt breathes on the corner of the bar icon.
+- **100%**: the icon and the panel turn the theme's green and you get a
+  "fully charged" notification, once per charge (again after dropping to 95%).
 
 ## Features
 
