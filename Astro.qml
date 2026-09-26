@@ -474,7 +474,7 @@ Panel {
       if (!root.hasReading) return "Astro A50 — " + Model.stateLabel(root.station).toLowerCase()
       return "Astro A50 — " + root.percent + "%, " + Model.stateLabel(root.station).toLowerCase() +
         (root.timeLeft.length > 0 ? ", " + root.timeLeft + " left" : "") +
-        (root.timeToFull.length > 0 ? ", full in " + root.timeToFull : "")
+        (root.fullyCharged ? ", fully charged" : root.timeToFull === "0m" ? ", almost full" : root.timeToFull.length > 0 ? ", full in " + root.timeToFull : "")
     }
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.togglePercentage()
@@ -603,10 +603,12 @@ Panel {
             // How long the current discharge has left at the rate it has
             // been dropping, from the backend's battery log.
             Text {
-              visible: root.hasReading && (root.charging || root.discharging)
+              visible: root.hasReading && (root.charging || root.discharging || root.fullyCharged)
               textFormat: Text.PlainText
-              text: root.charging
-                ? (root.timeToFull.length > 0 ? "full in " + root.timeToFull : "estimating…")
+              text: root.fullyCharged ? "fully charged"
+                : root.charging
+                ? (root.timeToFull === "0m" ? "almost full"
+                   : root.timeToFull.length > 0 ? "full in " + root.timeToFull : "estimating…")
                 : (root.timeLeft.length > 0 ? root.timeLeft + " left" : "estimating…")
               color: root.bar.foreground
               opacity: 0.6
