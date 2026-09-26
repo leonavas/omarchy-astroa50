@@ -505,7 +505,94 @@ class Gen5:
             self.set("dock-light", str(light))
 
 
+# ----------------------------------------------------------- battery life
+
+# A reading more than this long after the previous one means the device was
+# off or asleep in between; that stretch drained (next to) nothing, so it is
+# left out of the discharge clock instead of making the estimate optimistic.
+GAP_S = 15 * 60
+# Enough of a discharge to trust a slope: this long on battery, and at least
+# two percent steps crossed after the first reading.
+MIN_SPAN_S = 20 * 60
+RECENT_POINTS = 60
+
+
+def track_battery(path: str, percent: int, discharging: bool) -> int | None:
+    """Log one battery reading and return the minutes left, or None.
+
+    The discharge is kept as (seconds on battery, percent) points, one per
+    percent step, in a small state file so it survives the widget and the
+    shell restarting. Charging, docking or a jump back up starts a new one.
+    """
+    now = time.time()
+    try:
+        with open(path) as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {}
+    points = state.get("points") or []
+    clock = float(state.get("clock") or 0)
+    seen = state.get("seen")
+
+    if not discharging or percent <= 0:
+        points, clock = [], 0.0
+    else:
+        if seen is not None and 0 < now - seen <= GAP_S:
+            clock += now - seen
+        if points and percent > points[-1][1] + 1:
+            points, clock = [], 0.0
+        if not points or percent != points[-1][1]:
+            points.append([round(clock), percent])
+        points = points[-RECENT_POINTS:]
+
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as handle:
+            json.dump({"points": points, "clock": round(clock), "seen": now}, handle)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+    return estimate_minutes(points, clock, percent) if discharging else None
+
+
+def estimate_minutes(points: list, clock: float, percent: int) -> int | None:
+    # The first reading lands somewhere inside its percent step; only the
+    # later points sit on step boundaries, so the fit starts at the second.
+    points = points[1:]
+    if len(points) < 2 or points[-1][0] - points[0][0] < MIN_SPAN_S:
+        return None
+    # Least-squares slope of percent over time on battery.
+    n = len(points)
+    mean_t = sum(p[0] for p in points) / n
+    mean_p = sum(p[1] for p in points) / n
+    spread = sum((p[0] - mean_t) ** 2 for p in points)
+    if spread <= 0:
+        return None
+    slope = sum((p[0] - mean_t) * (p[1] - mean_p) for p in points) / spread
+    if slope >= 0:
+        return None
+    # The current step began at the last point and part of it is spent; the
+    # device may floor or round, so count the step from its middle.
+    left = (percent + 0.5) / -slope - (clock - points[-1][0])
+    return max(0, round(left / 60))
+
+
 # -------------------------------------------------------------------- main
+
+
+BATTERY_LOG = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                           "astro-a50", "battery.json")
+
+
+def with_estimate(state: dict) -> dict:
+    """Only a headset on and off the dock is discharging; docked or charging
+    starts the next discharge from scratch."""
+    headset = state.get("headset") or {}
+    battery = state.get("battery") or {}
+    discharging = bool(headset.get("on")) and not headset.get("docked") and not battery.get("charging")
+    if battery:
+        battery["minutesLeft"] = track_battery(BATTERY_LOG, int(battery.get("percent") or 0), discharging)
+    return state
 
 
 def run(args: list[str]) -> dict:
@@ -533,10 +620,9 @@ def run(args: list[str]) -> dict:
         head = {"connected": True, "name": "Astro A50", "generation": station.GENERATION}
         if command == "restore" and backup.get("generation", Gen4.GENERATION) != station.GENERATION:
             raise Failure("usage", "Backup is from a %s station" % backup.get("generation", "Gen 4"))
-        if command == "status":
-            return {**head, **station.status()}
-        if command == "battery":
-            return {**head, **station.battery_status()}
+        if command in ("status", "battery"):
+            state = station.status() if command == "status" else station.battery_status()
+            return {**head, **with_estimate(state)}
         if command == "info":
             firmware = station.firmware() if isinstance(station, Gen4) else {}
             return {**head, "node": node, "firmware": firmware}

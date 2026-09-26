@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "leonavas.astroa50",
   "name": "Astro A50",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "leonavas",
   "license": "MIT",
   "description": "The Astro A50 headset (Gen 4 and Gen 5) in the bar: battery with low-battery alerts, equalizer, mic level, sidetone, noise gate and game/voice mix, without Windows.",

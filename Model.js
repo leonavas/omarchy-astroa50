@@ -186,3 +186,12 @@ function themeColor(raw, keys, fallback) {
   }
   return fallback || ""
 }
+
+// Minutes left as "3h 25m", or "45m" under an hour; "" while there is no
+// estimate yet.
+function timeLeft(minutes) {
+  if (minutes === undefined || minutes === null || !isFinite(Number(minutes))) return ""
+  var m = Math.max(0, Math.round(Number(minutes)))
+  var h = Math.floor(m / 60)
+  return h > 0 ? h + "h " + (m % 60) + "m" : m + "m"
+}

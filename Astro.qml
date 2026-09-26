@@ -51,6 +51,8 @@ Panel {
   readonly property bool hasReading: Model.hasReading(root.station)
   readonly property int percent: root.hasReading ? Number(root.station.battery.percent) : 0
   readonly property bool charging: root.hasReading && !!root.station.battery.charging
+  readonly property bool discharging: root.headsetOn && !root.docked
+  readonly property string timeLeft: root.hasReading ? Model.timeLeft(root.station.battery.minutesLeft) : ""
   readonly property string alertLevel: root.hasReading
     ? Model.alertLevel(root.percent, root.charging, root.lowThreshold, root.criticalThreshold)
     : ""
@@ -271,13 +273,15 @@ Panel {
       persisted.notifiedLow = true
       notifyProc.command = ["notify-send", "--app-name=Astro A50", "--urgency=critical",
         "--expire-time=30000", "--icon=battery-caution", "Headset battery critical",
-        root.percent + "% left — dock it now, it is about to switch off."]
+        root.percent + "% left" + (root.timeLeft.length > 0 ? " (about " + root.timeLeft + ")" : "") +
+        " — dock it now, it is about to switch off."]
     } else {
       if (persisted.notifiedLow) return
       persisted.notifiedLow = true
       notifyProc.command = ["notify-send", "--app-name=Astro A50", "--urgency=normal",
         "--icon=audio-headset", "Headset battery running out",
-        root.percent + "% left — time to put it back on the dock."]
+        root.percent + "% left" + (root.timeLeft.length > 0 ? " (about " + root.timeLeft + ")" : "") +
+        " — time to put it back on the dock."]
     }
     notifyProc.running = true
   }
@@ -446,7 +450,8 @@ Panel {
     tooltipText: {
       if (!root.connected) return "Astro A50 — " + Model.stateLabel(root.station).toLowerCase()
       if (!root.hasReading) return "Astro A50 — " + Model.stateLabel(root.station).toLowerCase()
-      return "Astro A50 — " + root.percent + "%, " + Model.stateLabel(root.station).toLowerCase()
+      return "Astro A50 — " + root.percent + "%, " + Model.stateLabel(root.station).toLowerCase() +
+        (root.timeLeft.length > 0 ? ", " + root.timeLeft + " left" : "")
     }
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.togglePercentage()
@@ -465,7 +470,7 @@ Panel {
     bar: root.bar
     open: root.opened && root.shown
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(380))
+    contentWidth: panel.fittedContentWidth(Style.space(760))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
@@ -535,16 +540,35 @@ Panel {
             }
           }
 
-          Text {
-            textFormat: Text.PlainText
+          Column {
             id: heroPercent
-            text: root.hasReading ? root.percent + "%" : "—"
-            color: root.alertColor
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.displayLarge
-            font.bold: true
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
+            spacing: 0
+
+            Text {
+              textFormat: Text.PlainText
+              text: root.hasReading ? root.percent + "%" : "—"
+              color: root.alertColor
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.displayLarge
+              font.bold: true
+              anchors.right: parent.right
+            }
+
+            // How long the current discharge has left at the rate it has
+            // been dropping, from the backend's battery log.
+            Text {
+              visible: root.hasReading && !root.charging && root.discharging
+              textFormat: Text.PlainText
+              text: root.timeLeft.length > 0 ? root.timeLeft + " left" : "estimating…"
+              color: root.bar.foreground
+              opacity: 0.6
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              anchors.right: parent.right
+            }
           }
         }
 
@@ -596,306 +620,323 @@ Panel {
 
           PanelSeparator { foreground: root.bar.foreground }
 
-          // EQ preset + its five-band curve
-          Column {
+          // Two columns: the sound on the left (EQ, mix), the microphone on
+          // the right.
+          Row {
+            id: columns
             width: parent.width
-            spacing: Style.space(8)
+            spacing: Style.space(24)
+            readonly property real columnWidth: (width - spacing) / 2
 
-            Item {
-              width: parent.width
-              implicitHeight: Math.max(eqHeader.implicitHeight, eqActions.implicitHeight)
+            Column {
+              width: columns.columnWidth
+              spacing: Style.space(14)
+              // EQ preset + its five-band curve
+              Column {
+                width: parent.width
+                spacing: Style.space(8)
 
-              PanelSectionHeader {
-                id: eqHeader
-                text: "󰺢  EQUALIZER"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-              }
+                Item {
+                  width: parent.width
+                  implicitHeight: Math.max(eqHeader.implicitHeight, eqActions.implicitHeight)
 
-              Row {
-                id: eqActions
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(6)
+                  InfoHeader {
+                    id: eqHeader
+                    text: "󰺢  EQUALIZER"
+                    info: "What you hear in the headset: one gain per frequency band, low on the left to high on the right. Gen 4 keeps three named slots on the base station (ASTRO, PRO and STUDIO from the factory: bass-heavy, footsteps-forward, neutral) and the headset's EQ button cycles them; Gen 5 keeps one curve and the buttons are starting points. Mic EQ is separate and does not change this."
+                    foreground: root.bar.foreground
+                    fontFamily: root.bar.fontFamily
+                    anchors.left: parent.left
+                    anchors.right: eqActions.left
+                    anchors.top: parent.top
+                  }
 
-                Button {
-                  text: "Undo"
-                  visible: root.eqUnsaved
-                  tooltipText: "Back to what this preset has saved on the base station"
-                  fontSize: Style.font.caption
+                  Row {
+                    id: eqActions
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    spacing: Style.space(6)
+
+                    Button {
+                      text: "Undo"
+                      visible: root.eqUnsaved
+                      tooltipText: "Back to what this preset has saved on the base station"
+                      fontSize: Style.font.caption
+                      foreground: root.bar.foreground
+                      fontFamily: root.bar.fontFamily
+                      bordered: true
+                      verticalPadding: Style.spacing.controlPaddingY - Style.space(3)
+                      onClicked: root.setBandGains(root.eqSaved)
+                    }
+
+                    Button {
+                      text: "Original"
+                      visible: root.eqChanged
+                      tooltipText: "Back to this preset's curve in the original backup (" +
+                                   (root.eqOriginal ? root.eqOriginal.map(Model.gainLabel).join(" ") : "") + ")"
+                      fontSize: Style.font.caption
+                      foreground: root.bar.foreground
+                      fontFamily: root.bar.fontFamily
+                      bordered: true
+                      verticalPadding: Style.spacing.controlPaddingY - Style.space(3)
+                      onClicked: root.setBandGains(root.eqOriginal)
+                    }
+                  }
+                }
+
+                ButtonGroup {
+                  visible: root.has("eq-presets")
+                  options: Model.eqOptions(root.station.eqNames)
+                  value: String(root.eqPreset)
                   foreground: root.bar.foreground
                   fontFamily: root.bar.fontFamily
-                  bordered: true
-                  verticalPadding: Style.spacing.controlPaddingY - Style.space(3)
-                  onClicked: root.setBandGains(root.eqSaved)
+                  fontSize: Style.font.bodySmall
+                  focusable: false
+                  onChanged: function(v) { root.setEqPreset(Number(v)) }
                 }
 
-                Button {
-                  text: "Original"
-                  visible: root.eqChanged
-                  tooltipText: "Back to this preset's curve in the original backup (" +
-                               (root.eqOriginal ? root.eqOriginal.map(Model.gainLabel).join(" ") : "") + ")"
-                  fontSize: Style.font.caption
+                ButtonGroup {
+                  visible: root.has("eq-templates")
+                  options: root.eqTemplateNames
+                  value: root.eqTemplate
                   foreground: root.bar.foreground
                   fontFamily: root.bar.fontFamily
-                  bordered: true
-                  verticalPadding: Style.spacing.controlPaddingY - Style.space(3)
-                  onClicked: root.setBandGains(root.eqOriginal)
+                  fontSize: Style.font.bodySmall
+                  focusable: false
+                  onChanged: function(v) { root.setEqTemplate(v) }
+                }
+
+                Row {
+                  id: bands
+                  width: parent.width
+                  spacing: root.eqGains.length > 5 ? Style.space(3) : Style.space(6)
+                  readonly property int count: Math.max(1, root.eqGains.length)
+                  readonly property real bandWidth: (width - spacing * (count - 1)) / count
+
+                  Repeater {
+                    model: root.eqGains.length
+                    delegate: EqBand {
+                      required property int index
+                      band: index
+                      width: bands.bandWidth
+                      gain: Number(root.eqGains[index]) || 0
+                      freq: root.eqFreqs.length > index ? Model.freqLabel(root.eqFreqs[index]) : ""
+                    }
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Click above or below the line, or scroll, to move a band by 1 dB." +
+                        (root.has("eq-templates") ? " Presets are starting points; the base station keeps one curve." : "")
+                  color: root.bar.foreground
+                  opacity: 0.5
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                }
+              }
+
+              PanelSeparator { foreground: root.bar.foreground }
+
+              Column {
+                width: parent.width
+                spacing: Style.space(8)
+
+                InfoHeader {
+                  text: "󰕾  MIX"
+                  info: "Where the PC's audio lands and how game and voice chat are balanced."
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                }
+
+                Item {
+                  visible: !!root.astroSinks.game && !!root.astroSinks.chat
+                  width: parent.width
+                  implicitHeight: visible ? Math.max(outputLabel.implicitHeight, outputGroup.implicitHeight) : 0
+
+                  InfoLabel {
+                    id: outputLabel
+                    text: "PC output"
+                    info: "The station shows up as two sound cards, Game and Chat. This picks which one the PC's own audio (browser, music, games) plays on. Voice apps like Discord belong on Chat."
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    width: parent.width * 0.55
+                  }
+
+                  ButtonGroup {
+                    id: outputGroup
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    options: [
+                      { value: "game", label: "Game", tooltip: "System audio plays on the game channel" },
+                      { value: "chat", label: "Chat", tooltip: "System audio plays on the chat channel" }
+                    ]
+                    value: root.defaultOutput
+                    foreground: root.bar.foreground
+                    fontFamily: root.bar.fontFamily
+                    fontSize: Style.font.caption
+                    spacing: Style.space(6)
+                    focusable: false
+                    onChanged: function(v) { root.setOutput(v) }
+                  }
+                }
+
+                // The mix fades between the two sinks, so it only means something
+                // while the PC plays on game and voice apps sit on chat. With the
+                // default on chat everything shares one channel and the slider is
+                // just a volume knob, so it steps aside.
+                Text {
+                  textFormat: Text.PlainText
+                  visible: root.has("balance") && root.defaultOutput === "chat"
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "The game / voice mix shows while PC output is Game."
+                  color: root.bar.foreground
+                  opacity: 0.5
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                SettingSlider {
+                  visible: root.has("balance") && root.defaultOutput !== "chat"
+                  label: "Game / voice"
+                  info: "Balance between the station's two channels, Game and Chat, like the mix buttons on the headset. The middle is 50/50; leaving Game as PC output puts it back there."
+                  maximum: 255
+                  tickCount: 3
+                  value: Model.active(root.station, "defaultBalance", 127)
+                  valueText: Model.balanceLabel(value)
+                  onCommit: function(v) { root.setSlider("balance", "defaultBalance", v) }
+                }
+
+                SettingSlider {
+                  visible: root.has("headset-volume")
+                  label: "Headset volume"
+                  info: "Master volume of the headset itself."
+                  maximum: 100
+                  value: Model.active(root.station, "headsetVolume", 0)
+                  valueText: Math.round(value) + "%"
+                  onCommit: function(v) { root.setSlider("headset-volume", "headsetVolume", v) }
+                }
+
+                // Gen 5's mix lives on a dial on the headset; it reads back but
+                // cannot be set from here.
+                Item {
+                  visible: root.has("chatmix")
+                  width: parent.width
+                  implicitHeight: visible ? dialLabel.implicitHeight : 0
+
+                  InfoLabel {
+                    id: dialLabel
+                    text: "Game / voice dial"
+                    info: "The mix dial on the headset, read back from it. It can only be turned on the headset."
+                    anchors.left: parent.left
+                    width: parent.width * 0.55
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: Model.dialLabel(root.station.chatmix)
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                    anchors.right: parent.right
+                  }
+                }
+
+                SettingSlider {
+                  visible: root.has("dock-light")
+                  label: "Dock light"
+                  info: "Brightness of the light on the base station."
+                  maximum: 100
+                  value: Model.active(root.station, "dockLight", 100)
+                  valueText: Math.round(value) + "%"
+                  onCommit: function(v) { root.setSlider("dock-light", "dockLight", v) }
+                }
+
+                SettingSlider {
+                  visible: root.has("alert-volume")
+                  label: "Alert volume"
+                  info: "Volume of the headset's own beeps and voice prompts: power, low battery, mute."
+                  maximum: 100
+                  value: Model.active(root.station, "alertVolume", 0)
+                  valueText: Math.round(value) + "%"
+                  onCommit: function(v) { root.setSlider("alert-volume", "alertVolume", v) }
                 }
               }
             }
 
-            ButtonGroup {
-              visible: root.has("eq-presets")
-              options: Model.eqOptions(root.station.eqNames)
-              value: String(root.eqPreset)
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              fontSize: Style.font.bodySmall
-              focusable: false
-              onChanged: function(v) { root.setEqPreset(Number(v)) }
-            }
+            Column {
+              width: columns.columnWidth
+              spacing: Style.space(14)
+              Column {
+                width: parent.width
+                spacing: Style.space(8)
 
-            ButtonGroup {
-              visible: root.has("eq-templates")
-              options: root.eqTemplateNames
-              value: root.eqTemplate
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              fontSize: Style.font.bodySmall
-              focusable: false
-              onChanged: function(v) { root.setEqTemplate(v) }
-            }
+                InfoHeader {
+                  text: "󰍬  MICROPHONE"
+                  info: "How your voice is picked up and sent to others."
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                }
 
-            Row {
-              id: bands
-              width: parent.width
-              spacing: root.eqGains.length > 5 ? Style.space(3) : Style.space(6)
-              readonly property int count: Math.max(1, root.eqGains.length)
-              readonly property real bandWidth: (width - spacing * (count - 1)) / count
+                SettingSlider {
+                  visible: root.has("mic-level")
+                  label: "Level"
+                  info: "Microphone gain: how loud your voice goes out. Too high also picks up keys and breathing."
+                  maximum: 100
+                  value: Model.active(root.station, "mic", 0)
+                  valueText: Math.round(value) + "%"
+                  onCommit: function(v) { root.setSlider("mic", "mic", v) }
+                }
 
-              Repeater {
-                model: root.eqGains.length
-                delegate: EqBand {
-                  required property int index
-                  band: index
-                  width: bands.bandWidth
-                  gain: Number(root.eqGains[index]) || 0
-                  freq: root.eqFreqs.length > index ? Model.freqLabel(root.eqFreqs[index]) : ""
+                SettingSlider {
+                  label: "Sidetone"
+                  info: "How much of your own voice you hear back in the headset, so you don't end up shouting. 0 is off."
+                  maximum: 100
+                  step: Number(root.station.sidetoneStep || 1)
+                  value: Model.active(root.station, "sidetone", 0)
+                  valueText: Math.round(value) + "%"
+                  onCommit: function(v) { root.setSidetone(v) }
+                }
+
+                InfoLabel {
+                  text: "Noise gate"
+                  info: "Mutes the mic while the sound stays under a threshold, so background noise stays out between words. Streaming (Off on Gen 5) leaves it open; Night, Home and Tournament cut progressively harder. Tournament is for loud rooms."
+                  width: parent.width
+                }
+
+                ButtonGroup {
+                  options: Model.noiseGateOptions(root.station.generation)
+                  value: String(Model.active(root.station, "noiseGate", "") || "")
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  fontSize: Style.font.caption
+                  spacing: Style.space(6)
+                  focusable: false
+                  onChanged: function(v) { root.setNoiseGate(v) }
+                }
+
+                InfoLabel {
+                  visible: root.has("mic-eq")
+                  text: "Mic EQ"
+                  info: "An equalizer for your voice as the others hear it. It does not touch what you hear, so the curve above stays put. The station only reports the preset number and what each one does is undocumented; record yourself on each to compare."
+                  width: parent.width
+                }
+
+                ButtonGroup {
+                  visible: root.has("mic-eq")
+                  options: [{ value: "0", label: "1" }, { value: "1", label: "2" }, { value: "2", label: "3" }]
+                  value: String(Model.active(root.station, "micEq", 0))
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  fontSize: Style.font.caption
+                  focusable: false
+                  onChanged: function(v) { root.setMicEq(Number(v)) }
                 }
               }
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              text: "Click above or below the line, or scroll, to move a band by 1 dB." +
-                    (root.has("eq-templates") ? " Presets are starting points; the base station keeps one curve." : "")
-              color: root.bar.foreground
-              opacity: 0.5
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              width: parent.width
-              wrapMode: Text.WordWrap
-            }
-          }
-
-          PanelSeparator { foreground: root.bar.foreground }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSectionHeader {
-              text: "󰍬  MICROPHONE"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            SettingSlider {
-              visible: root.has("mic-level")
-              label: "Level"
-              maximum: 100
-              value: Model.active(root.station, "mic", 0)
-              valueText: Math.round(value) + "%"
-              onCommit: function(v) { root.setSlider("mic", "mic", v) }
-            }
-
-            SettingSlider {
-              label: "Sidetone"
-              maximum: 100
-              step: Number(root.station.sidetoneStep || 1)
-              value: Model.active(root.station, "sidetone", 0)
-              valueText: Math.round(value) + "%"
-              onCommit: function(v) { root.setSidetone(v) }
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              text: "Noise gate"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            ButtonGroup {
-              options: Model.noiseGateOptions(root.station.generation)
-              value: String(Model.active(root.station, "noiseGate", "") || "")
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              fontSize: Style.font.caption
-              spacing: Style.space(6)
-              focusable: false
-              onChanged: function(v) { root.setNoiseGate(v) }
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              visible: root.has("mic-eq")
-              text: "Mic EQ"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            ButtonGroup {
-              visible: root.has("mic-eq")
-              options: [{ value: "0", label: "1" }, { value: "1", label: "2" }, { value: "2", label: "3" }]
-              value: String(Model.active(root.station, "micEq", 0))
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              fontSize: Style.font.caption
-              focusable: false
-              onChanged: function(v) { root.setMicEq(Number(v)) }
-            }
-          }
-
-          PanelSeparator { foreground: root.bar.foreground }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSectionHeader {
-              text: "󰕾  MIX"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            Item {
-              visible: !!root.astroSinks.game && !!root.astroSinks.chat
-              width: parent.width
-              implicitHeight: visible ? Math.max(outputLabel.implicitHeight, outputGroup.implicitHeight) : 0
-
-              Text {
-                textFormat: Text.PlainText
-                id: outputLabel
-                text: "PC output"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              ButtonGroup {
-                id: outputGroup
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                options: [
-                  { value: "game", label: "Game", tooltip: "System audio plays on the game channel" },
-                  { value: "chat", label: "Chat", tooltip: "System audio plays on the chat channel" }
-                ]
-                value: root.defaultOutput
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                fontSize: Style.font.caption
-                spacing: Style.space(6)
-                focusable: false
-                onChanged: function(v) { root.setOutput(v) }
-              }
-            }
-
-            // The mix fades between the two sinks, so it only means something
-            // while the PC plays on game and voice apps sit on chat. With the
-            // default on chat everything shares one channel and the slider is
-            // just a volume knob, so it steps aside.
-            Text {
-              textFormat: Text.PlainText
-              visible: root.has("balance") && root.defaultOutput === "chat"
-              width: parent.width
-              wrapMode: Text.WordWrap
-              text: "The game / voice mix shows while PC output is Game."
-              color: root.bar.foreground
-              opacity: 0.5
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            SettingSlider {
-              visible: root.has("balance") && root.defaultOutput !== "chat"
-              label: "Game / voice"
-              maximum: 255
-              tickCount: 3
-              value: Model.active(root.station, "defaultBalance", 127)
-              valueText: Model.balanceLabel(value)
-              onCommit: function(v) { root.setSlider("balance", "defaultBalance", v) }
-            }
-
-            SettingSlider {
-              visible: root.has("headset-volume")
-              label: "Headset volume"
-              maximum: 100
-              value: Model.active(root.station, "headsetVolume", 0)
-              valueText: Math.round(value) + "%"
-              onCommit: function(v) { root.setSlider("headset-volume", "headsetVolume", v) }
-            }
-
-            // Gen 5's mix lives on a dial on the headset; it reads back but
-            // cannot be set from here.
-            Item {
-              visible: root.has("chatmix")
-              width: parent.width
-              implicitHeight: visible ? dialLabel.implicitHeight : 0
-
-              Text {
-                textFormat: Text.PlainText
-                id: dialLabel
-                text: "Game / voice dial"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                anchors.left: parent.left
-              }
-
-              Text {
-                textFormat: Text.PlainText
-                text: Model.dialLabel(root.station.chatmix)
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
-                anchors.right: parent.right
-              }
-            }
-
-            SettingSlider {
-              visible: root.has("dock-light")
-              label: "Dock light"
-              maximum: 100
-              value: Model.active(root.station, "dockLight", 100)
-              valueText: Math.round(value) + "%"
-              onCommit: function(v) { root.setSlider("dock-light", "dockLight", v) }
-            }
-
-            SettingSlider {
-              visible: root.has("alert-volume")
-              label: "Alert volume"
-              maximum: 100
-              value: Model.active(root.station, "alertVolume", 0)
-              valueText: Math.round(value) + "%"
-              onCommit: function(v) { root.setSlider("alert-volume", "alertVolume", v) }
             }
           }
 
@@ -962,6 +1003,8 @@ Panel {
     property real maximum: 100
     property int tickCount: 0
     property real step: 1
+    property string info: ""
+    property bool showInfo: false
     signal commit(real value)
 
     width: parent ? parent.width : 0
@@ -981,6 +1024,15 @@ Panel {
         anchors.left: parent.left
       }
 
+      InfoIcon {
+        info: sliderRow.info
+        open: sliderRow.showInfo
+        anchors.left: rowLabel.right
+        anchors.leftMargin: Style.space(6)
+        anchors.verticalCenter: rowLabel.verticalCenter
+        onToggled: sliderRow.showInfo = !sliderRow.showInfo
+      }
+
       Text {
         textFormat: Text.PlainText
         text: sliderRow.valueText
@@ -991,6 +1043,8 @@ Panel {
         anchors.right: parent.right
       }
     }
+
+    InfoText { text: sliderRow.info; visible: sliderRow.showInfo }
 
     PanelSlider {
       bar: root.bar
@@ -1080,5 +1134,87 @@ Panel {
       onClicked: function(mouse) { root.nudgeBand(eqBand.band, mouse.y < eqBand.half ? 1 : -1) }
       onWheel: function(wheel) { root.nudgeBand(eqBand.band, wheel.angleDelta.y > 0 ? 1 : -1) }
     }
+  }
+
+  // A ⓘ that folds an explanation open; the owner keeps the open state.
+  component InfoIcon: Text {
+    id: icon
+    property string info: ""
+    property bool open: false
+    signal toggled()
+    visible: icon.info.length > 0
+    textFormat: Text.PlainText
+    text: icon.open ? "󰋼" : "󰋽"
+    color: root.bar.foreground
+    opacity: iconMouse.containsMouse || icon.open ? 1 : 0.5
+    font.family: root.bar.fontFamily
+    font.pixelSize: Style.font.bodySmall
+
+    MouseArea {
+      id: iconMouse
+      anchors.fill: parent
+      anchors.margins: -Style.space(4)
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: icon.toggled()
+    }
+  }
+
+  component InfoText: Text {
+    textFormat: Text.PlainText
+    width: parent ? parent.width : 0
+    wrapMode: Text.WordWrap
+    color: root.bar.foreground
+    opacity: 0.65
+    font.family: root.bar.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  // A plain row label with its own ⓘ.
+  component InfoLabel: Column {
+    id: infoLabel
+    property string text: ""
+    property string info: ""
+    property bool showInfo: false
+    spacing: Style.space(4)
+
+    Row {
+      spacing: Style.space(6)
+      Text {
+        textFormat: Text.PlainText
+        text: infoLabel.text
+        color: root.bar.foreground
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+      InfoIcon { info: infoLabel.info; open: infoLabel.showInfo; onToggled: infoLabel.showInfo = !infoLabel.showInfo }
+    }
+
+    InfoText { text: infoLabel.info; visible: infoLabel.showInfo }
+  }
+
+  // A section header with its own ⓘ.
+  component InfoHeader: Column {
+    id: infoHeader
+    property string text: ""
+    property string info: ""
+    property color foreground: root.bar.foreground
+    property string fontFamily: root.bar.fontFamily
+    property bool showInfo: false
+    width: parent ? parent.width : 0
+    spacing: Style.space(4)
+
+    Row {
+      spacing: Style.space(6)
+      PanelSectionHeader { text: infoHeader.text; foreground: infoHeader.foreground; fontFamily: infoHeader.fontFamily }
+      InfoIcon {
+        info: infoHeader.info
+        open: infoHeader.showInfo
+        anchors.verticalCenter: parent.verticalCenter
+        onToggled: infoHeader.showInfo = !infoHeader.showInfo
+      }
+    }
+
+    InfoText { text: infoHeader.info; visible: infoHeader.showInfo }
   }
 }

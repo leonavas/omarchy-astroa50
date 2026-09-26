@@ -10,12 +10,16 @@ on Windows.
 
 - **15%**: the icon turns yellow and you get a desktop notification.
 - **5%**: the icon turns red and you get a critical notification that stays on screen.
+- **Time left**: while the headset is on and off the dock, the panel shows how long
+  the battery has left (`3h 25m`, or `45m` under an hour), fitted to how fast it
+  has been dropping. It says "estimating…" until it has seen two percent steps
+  over 20 minutes; time with the headset off doesn't count.
 
 ## Features
 
 | Feature | Gen 4 | Gen 5 |
 |---|:-:|:-:|
-| Battery level and charging state | ✓ | ✓ |
+| Battery level, charging state and time left | ✓ | ✓ |
 | Equalizer presets | ✓ 3 on the station | ✓ Flat, Gaming, Media |
 | Equalizer bands | ✓ 5 bands, ±7 dB | ✓ 10 bands, ±6 dB |
 | Mic level | ✓ | |
@@ -82,6 +86,8 @@ bin/astro-a50 restore backup.json    # restore
 
 - **The base station**, only when you change a setting.
 - Its own entry in `~/.config/omarchy/shell.json`, only when you toggle the percentage.
+- `~/.local/state/astro-a50/battery.json`, the current discharge (one point per
+  percent step) behind the time-left estimate. Docking starts it over.
 - Gen 5 only: `~/.local/state/astro-a50/gen5.json`, which remembers the last
   sidetone, EQ, noise gate and dock light values because the station can't
   report them back.
