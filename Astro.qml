@@ -376,16 +376,11 @@ Panel {
     }
   }
 
-  property bool saveAfterWrites: false
-
   Process {
     id: writeProc
     onExited: {
       if (root.pendingOrder.length > 0) {
         root.pumpWrites()
-      } else if (root.saveAfterWrites) {
-        root.saveAfterWrites = false
-        root.save()
       } else {
         settleTimer.restart()
       }
@@ -429,12 +424,10 @@ Panel {
   onDefaultOutputChanged: {
     var left = root.lastOutput === "game" && root.defaultOutput !== "game"
     root.lastOutput = root.defaultOutput
-    if (left && root.connected && root.has("balance")) {
+    // Only the active value: SAVE_VALUES is all-or-nothing on the station,
+    // so saving here would also keep any other unsaved change. Save does it.
+    if (left && root.connected && root.has("balance"))
       root.setSlider("balance", "defaultBalance", 127)
-      // Saved too, so the headset also powers up centred. SAVE_VALUES is
-      // all-or-nothing on the station: anything else unsaved goes with it.
-      root.saveAfterWrites = true
-    }
   }
 
   function setOutput(kind) {
