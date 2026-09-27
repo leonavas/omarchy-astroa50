@@ -118,8 +118,16 @@ class Link:
     def __init__(self, node: str) -> None:
         # One caller at a time: the bar poll and a panel write racing on the
         # same node would each read the other's answer.
-        runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-        self._lock = open(os.path.join(runtime, "astro-a50.lock"), "w")
+        # The lock lives in a directory only this user owns (never /tmp), and
+        # is opened without following links or truncating anything.
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if not runtime:
+            state_home = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+            runtime = os.path.join(state_home, "astro-a50")
+            os.makedirs(runtime, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(runtime, "astro-a50.lock"),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        self._lock = os.fdopen(fd, "r+")
         fcntl.flock(self._lock, fcntl.LOCK_EX)
         try:
             self._fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
